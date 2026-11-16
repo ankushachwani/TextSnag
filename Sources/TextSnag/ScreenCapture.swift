@@ -55,8 +55,12 @@ enum ScreenCapture {
         }
     }
 
+    /// Fully decodes the image into memory. (A CGImage made straight from a file URL is
+    /// lazy: it keeps reading the file, which breaks once the temp file is deleted.)
     static func loadImage(_ path: String) -> CGImage? {
-        guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { return nil }
-        return CGImageSourceCreateImageAtIndex(src, 0, nil)
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+              let src = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+        return CGImageSourceCreateImageAtIndex(src, 0, options)
     }
 }

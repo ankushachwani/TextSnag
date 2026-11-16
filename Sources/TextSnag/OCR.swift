@@ -41,7 +41,6 @@ enum OCR {
             try? VNImageRequestHandler(cgImage: image, options: [:]).perform([fast])
             lines = extract(fast)
         }
-        isWarm = true
         codesDone.wait()
 
         let text = format(lines, keepLineBreaks: keepLineBreaks)
@@ -52,8 +51,15 @@ enum OCR {
     /// The first time an app uses Apple's text recognizer, macOS prepares the model for that
     /// app, which can take close to a minute on macOS 27. After that it's cached and takes
     /// ~0.1 s. Doing one throwaway recognition at launch means real captures are always fast.
+    /// Uses both a small image and a full-size Retina one, since a tiny image alone doesn't
+    /// prepare everything a real screen grab needs.
     static func warmUp() {
         _ = recognize(sampleImage(), keepLineBreaks: true)
+        let page = (1...24).map { i in
+            i % 6 == 0 ? "" : "Line \(i): The quick brown fox jumps over the lazy dog, 0123456789 (warm-up) — café"
+        }
+        _ = recognize(sampleImage(page, scale: 2), keepLineBreaks: true)
+        isWarm = true
     }
 
     // MARK: - Private
@@ -104,12 +110,13 @@ enum OCR {
     }
 
     /// A small image with a couple of lines of text, used for warm-up and self-tests.
-    static func sampleImage(_ lines: [String] = ["TextSnag warm up", "Hello world 123"]) -> CGImage {
+    static func sampleImage(_ lines: [String] = ["TextSnag warm up", "Hello world 123"], scale: CGFloat = 1) -> CGImage {
         let lineHeight: CGFloat = 44
         let size = NSSize(width: 900, height: 60 + CGFloat(lines.count) * lineHeight)
-        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height),
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale),
                                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
                                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        rep.size = size // draw in points; `scale` sets the pixel density
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
         NSColor.white.setFill()
