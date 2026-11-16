@@ -28,7 +28,17 @@ final class Settings: ObservableObject {
     static let shared = Settings()
     private let d = UserDefaults.standard
 
+    // Formatting
     @Published var keepLineBreaks: Bool { didSet { d.set(keepLineBreaks, forKey: "keepLineBreaks") } }
+    @Published var keepIndentation: Bool { didSet { d.set(keepIndentation, forKey: "keepIndentation") } }
+    @Published var tidyBullets: Bool { didSet { d.set(tidyBullets, forKey: "tidyBullets") } }
+    @Published var fixPunctuation: Bool { didSet { d.set(fixPunctuation, forKey: "fixPunctuation") } }
+    @Published var straightQuotes: Bool { didSet { d.set(straightQuotes, forKey: "straightQuotes") } }
+    @Published var detectCode: Bool { didSet { d.set(detectCode, forKey: "detectCode") } }
+    @Published var detectTables: Bool { didSet { d.set(detectTables, forKey: "detectTables") } }
+    @Published var directText: Bool { didSet { d.set(directText, forKey: "directText") } }
+
+    // Clipboard & after capture
     @Published var additive: Bool {
         didSet {
             d.set(additive, forKey: "additiveClipboard")
@@ -36,30 +46,48 @@ final class Settings: ObservableObject {
         }
     }
     @Published var additiveBuffer: String { didSet { d.set(additiveBuffer, forKey: "additiveBuffer") } }
+    @Published var quickActions: Bool { didSet { d.set(quickActions, forKey: "quickActions") } }
     @Published var speak: Bool { didSet { d.set(speak, forKey: "speakAfterCapture") } }
     @Published var openLinks: Bool { didSet { d.set(openLinks, forKey: "openQRLinks") } }
     @Published var showToast: Bool { didSet { d.set(showToast, forKey: "showToast") } }
     @Published var playSound: Bool { didSet { d.set(playSound, forKey: "playSound") } }
+
     @Published private(set) var shortcuts: [ShortcutAction: Shortcut] = [:]
 
     /// Fired whenever a shortcut changes so the hot keys get re-registered.
     let shortcutsChanged = PassthroughSubject<Void, Never>()
 
     private init() {
-        keepLineBreaks = d.object(forKey: "keepLineBreaks") as? Bool ?? true
-        additive = d.bool(forKey: "additiveClipboard")
+        let d = UserDefaults.standard
+        func bool(_ key: String, _ defaultValue: Bool) -> Bool { d.object(forKey: key) as? Bool ?? defaultValue }
+        keepLineBreaks = bool("keepLineBreaks", true)
+        keepIndentation = bool("keepIndentation", true)
+        tidyBullets = bool("tidyBullets", true)
+        fixPunctuation = bool("fixPunctuation", true)
+        straightQuotes = bool("straightQuotes", false)
+        detectCode = bool("detectCode", true)
+        detectTables = bool("detectTables", true)
+        directText = bool("directText", true)
+        additive = bool("additiveClipboard", false)
         additiveBuffer = d.string(forKey: "additiveBuffer") ?? ""
-        speak = d.bool(forKey: "speakAfterCapture")
-        openLinks = d.bool(forKey: "openQRLinks")
-        showToast = d.object(forKey: "showToast") as? Bool ?? true
-        playSound = d.bool(forKey: "playSound")
+        quickActions = bool("quickActions", true)
+        speak = bool("speakAfterCapture", false)
+        openLinks = bool("openQRLinks", false)
+        showToast = bool("showToast", true)
+        playSound = bool("playSound", false)
         for action in ShortcutAction.allCases {
             if let data = d.data(forKey: "shortcut.\(action.rawValue)") {
-                shortcuts[action] = try? JSONDecoder().decode(Shortcut?.self, from: data) ?? nil
+                shortcuts[action] = (try? JSONDecoder().decode(Shortcut?.self, from: data)) ?? nil
             } else {
                 shortcuts[action] = action.defaultShortcut
             }
         }
+    }
+
+    func formatOptions(keepLineBreaks override: Bool? = nil) -> FormatOptions {
+        FormatOptions(keepLineBreaks: override ?? keepLineBreaks, keepIndentation: keepIndentation,
+                      tidyBullets: tidyBullets, fixPunctuation: fixPunctuation, straightQuotes: straightQuotes,
+                      detectCode: detectCode, detectTables: detectTables)
     }
 
     func shortcut(for action: ShortcutAction) -> Shortcut? { shortcuts[action] }

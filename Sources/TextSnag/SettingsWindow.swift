@@ -9,10 +9,11 @@ final class SettingsWindow {
 
     func show() {
         if window == nil {
-            let savedTab = min(UserDefaults.standard.integer(forKey: "settingsTab"), 2) // read before tabs are added
+            let savedTab = min(UserDefaults.standard.integer(forKey: "settingsTab"), 3) // read before tabs are added
             let tabs = SettingsTabController()
             tabs.tabStyle = .toolbar
             tabs.addPane("General", "gearshape", GeneralPane())
+            tabs.addPane("Formatting", "text.alignleft", FormattingPane())
             tabs.addPane("Shortcuts", "keyboard", ShortcutsPane())
             tabs.addPane("About", "info.circle", AboutPane())
 
@@ -97,10 +98,6 @@ private struct GeneralPane: View {
 
     var body: some View {
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 14) {
-            Row(label: "Text") {
-                Toggle("Keep line breaks", isOn: $settings.keepLineBreaks)
-                Hint("When off, lines are joined into paragraphs.")
-            }
             Row(label: "Clipboard") {
                 Toggle("Additive clipboard", isOn: $settings.additive)
                 Hint("Each capture is added after the previous ones.")
@@ -112,6 +109,9 @@ private struct GeneralPane: View {
             Divider().gridCellColumns(2)
             Row(label: "After capture") {
                 Toggle("Show “Copied” bubble", isOn: $settings.showToast)
+                Toggle("Quick actions in the bubble", isOn: $settings.quickActions)
+                    .disabled(!settings.showToast)
+                Hint("One line, numbers only, Markdown table, open link, call…")
                 Toggle("Play sound", isOn: $settings.playSound)
                 Toggle("Read text aloud", isOn: $settings.speak)
                 Toggle("Open links from QR codes", isOn: $settings.openLinks)
@@ -124,8 +124,62 @@ private struct GeneralPane: View {
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 24)
-        .frame(width: 460, alignment: .leading)
+        .frame(width: 480, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct FormattingPane: View {
+    @ObservedObject private var settings = Settings.shared
+    @State private var trusted = DirectText.isTrusted
+    private let poll = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 14) {
+            Row(label: "Direct Text") {
+                Toggle("Copy the app’s own text when possible", isOn: Binding(
+                    get: { settings.directText },
+                    set: { on in
+                        settings.directText = on
+                        if on && !DirectText.isTrusted { DirectText.requestAccess() }
+                    }))
+                Hint("Exact characters, no recognition mistakes, for dialogs, settings and web pages. Images and video still use OCR.")
+                if settings.directText && !trusted {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Text("Needs Accessibility access").font(.callout)
+                        Button("Allow…") {
+                            DirectText.requestAccess()
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+                        }
+                        .controlSize(.small)
+                    }
+                }
+            }
+            Divider().gridCellColumns(2)
+            Row(label: "Detect") {
+                Toggle("Code", isOn: $settings.detectCode)
+                Hint("Turns off autocorrect, keeps indentation, fixes quotes, handles dark terminals.")
+                Toggle("Tables", isOn: $settings.detectTables)
+                Hint("Copied as columns, ready to paste into Numbers, Excel or Sheets.")
+            }
+            Divider().gridCellColumns(2)
+            Row(label: "Text") {
+                Toggle("Keep line breaks", isOn: $settings.keepLineBreaks)
+                Hint("When off, lines are joined into paragraphs.")
+                Toggle("Keep indentation", isOn: $settings.keepIndentation)
+                Toggle("Tidy bullets", isOn: $settings.tidyBullets)
+                Hint("Every bullet style (●, ▪, -, *…) becomes •.")
+                Toggle("Fix punctuation spacing", isOn: $settings.fixPunctuation)
+                Hint("“word ,word” becomes “word, word”.")
+                Toggle("Use straight quotes", isOn: $settings.straightQuotes)
+            }
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 24)
+        .frame(width: 480, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .onReceive(poll) { _ in trusted = DirectText.isTrusted }
     }
 }
 
@@ -162,7 +216,7 @@ private struct ShortcutsPane: View {
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 24)
-        .frame(width: 460)
+        .frame(width: 480)
         .fixedSize(horizontal: false, vertical: true)
     }
 }
@@ -188,7 +242,7 @@ private struct AboutPane: View {
                 .padding(.top, 4)
         }
         .padding(28)
-        .frame(width: 460)
+        .frame(width: 480)
         .fixedSize(horizontal: false, vertical: true)
     }
 }

@@ -1,41 +1,68 @@
 import AppKit
 
-/// A small "Copied" bubble at the top of the screen that fades out on its own.
+/// A button in the bubble. `run` returns the confirmation to show, or nil to just close it.
+struct ToastAction {
+    let title: String
+    let run: () -> String?
+}
+
+/// The small bubble at the top of the screen ("Copied text"), optionally with quick-action
+/// buttons. Fades out on its own; stays while the pointer is over it.
 final class Toast {
     private static var panel: NSPanel?
     private static var hideWork: DispatchWorkItem?
+    private static var targets: [ActionTarget] = []
 
-    static func show(_ message: String, symbol: String = "doc.on.clipboard") {
+    static func show(_ message: String, symbol: String = "doc.on.clipboard", actions: [ToastAction] = []) {
         hideWork?.cancel()
         panel?.orderOut(nil)
+        targets = []
+
+        let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
+        icon.contentTintColor = .labelColor
+        icon.symbolConfiguration = .init(pointSize: 13, weight: .semibold)
 
         let label = NSTextField(labelWithString: message)
-        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.font = .systemFont(ofSize: 13, weight: .semibold)
         label.textColor = .labelColor
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
 
-        let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
-        icon.contentTintColor = .labelColor
+        var views: [NSView] = [icon, label]
+        if !actions.isEmpty {
+            let divider = NSBox()
+            divider.boxType = .separator
+            divider.translatesAutoresizingMaskIntoConstraints = false
+            divider.heightAnchor.constraint(equalToConstant: 16).isActive = true
+            views.append(divider)
+            for action in actions {
+                let target = ActionTarget(action)
+                targets.append(target)
+                views.append(pillButton(action.title, target: target))
+            }
+        }
 
-        let stack = NSStackView(views: [icon, label])
+        let stack = NSStackView(views: views)
         stack.orientation = .horizontal
+        stack.alignment = .centerY
         stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 14, bottom: 10, right: 16)
+        stack.setCustomSpacing(12, after: label)
+        stack.edgeInsets = NSEdgeInsets(top: 8, left: 14, bottom: 8, right: actions.isEmpty ? 16 : 8)
 
-        let effect = NSVisualEffectView()
-        effect.material = .hudWindow
-        effect.state = .active
-        effect.wantsLayer = true
-        effect.layer?.cornerRadius = 12
-        effect.addSubview(stack)
+        let content = HoverView()
+        content.material = .hudWindow
+        content.state = .active
+        content.wantsLayer = true
+        content.layer?.cornerRadius = 14
+        content.layer?.cornerCurve = .continuous
+        content.addSubview(stack)
         stack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: effect.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: effect.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: effect.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: effect.bottomAnchor),
-            label.widthAnchor.constraint(lessThanOrEqualToConstant: 420),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: content.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            label.widthAnchor.constraint(lessThanOrEqualToConstant: 360),
         ])
 
         let size = stack.fittingSize
@@ -50,13 +77,25 @@ final class Toast {
         p.backgroundColor = .clear
         p.hasShadow = true
         p.level = .statusBar
-        p.ignoresMouseEvents = true
+        p.ignoresMouseEvents = actions.isEmpty
+        p.becomesKeyOnlyIfNeeded = true
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        p.contentView = effect
-        p.alphaValue = 1
+        p.contentView = content
         p.orderFrontRegardless()
         panel = p
 
+        let delay: TimeInterval = actions.isEmpty ? 1.4 : 4
+        content.onHover = { inside in
+            if inside { hideWork?.cancel() } else { scheduleHide(after: 1.2) }
+        }
+        scheduleHide(after: delay)
+    }
+
+    static func dismiss() { scheduleHide(after: 0) }
+
+    private static func scheduleHide(after delay: TimeInterval) {
+        hideWork?.cancel()
+        guard let p = panel else { return }
         let work = DispatchWorkItem {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.25
@@ -64,6 +103,47 @@ final class Toast {
             }, completionHandler: { p.orderOut(nil) })
         }
         hideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private static func pillButton(_ title: String, target: ActionTarget) -> NSButton {
+        let b = NSButton(title: title, target: target, action: #selector(ActionTarget.run))
+        b.isBordered = false
+        b.font = .systemFont(ofSize: 12, weight: .medium)
+        b.contentTintColor = .labelColor
+        b.wantsLayer = true
+        b.layer?.cornerRadius = 9
+        b.layer?.cornerCurve = .continuous
+        b.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.1).cgColor
+        b.translatesAutoresizingMaskIntoConstraints = false
+        let width = (title as NSString).size(withAttributes: [.font: b.font!]).width + 20
+        b.widthAnchor.constraint(equalToConstant: ceil(width)).isActive = true
+        b.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        b.setAccessibilityLabel(title)
+        return b
+    }
+
+    private final class ActionTarget: NSObject {
+        let action: ToastAction
+        init(_ action: ToastAction) { self.action = action }
+        @objc func run() {
+            if let confirmation = action.run() {
+                Toast.show(confirmation, symbol: "checkmark")
+            } else {
+                Toast.dismiss()
+            }
+        }
+    }
+
+    private final class HoverView: NSVisualEffectView {
+        var onHover: ((Bool) -> Void)?
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways],
+                                           owner: self, userInfo: nil))
+        }
+        override func mouseEntered(with event: NSEvent) { onHover?(true) }
+        override func mouseExited(with event: NSEvent) { onHover?(false) }
     }
 }

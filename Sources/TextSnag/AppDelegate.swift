@@ -12,9 +12,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let settings = Settings.shared
     private var subscriptions = Set<AnyCancellable>()
 
-    // Selection tracking, for "Capture Previous Area" and timing.
+    // Selection tracking: for Direct Text, "Capture Previous Area", and timing.
     private var mouseMonitor: Any?
     private var dragStart: NSPoint?
+    private var captureArea: CGRect? // this capture's area, if known
     private var lastArea: CGRect?
     private var mouseUpTime: Date?
 
@@ -22,7 +23,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: "TextSnag")
+        statusItem.button?.image = Self.menuBarIcon()
+        statusItem.button?.setAccessibilityLabel("TextSnag")
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -56,6 +58,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         SettingsWindow.shared.show()
         return false
+    }
+
+    /// The "Lift" logo as a menu bar template image: a page with one line lifted out.
+    static func menuBarIcon() -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: true) { _ in
+            NSColor.black.withAlphaComponent(0.5).setFill()
+            NSBezierPath(roundedRect: NSRect(x: 3, y: 2.6, width: 10, height: 1.6), xRadius: 0.8, yRadius: 0.8).fill()
+            NSBezierPath(roundedRect: NSRect(x: 3, y: 13.4, width: 8, height: 1.6), xRadius: 0.8, yRadius: 0.8).fill()
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: NSRect(x: 1.8, y: 6.6, width: 14.4, height: 4.2), xRadius: 1.2, yRadius: 1.2).fill()
+            return true
+        }
+        image.isTemplate = true // macOS tints it for light/dark menu bars
+        return image
     }
 
     /// Menu-bar apps have no visible main menu, but it's what makes ⌘W / ⌘Q / ⌘C work in the
@@ -116,6 +132,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if !OCR.isWarm { toast("Getting ready (first launch only)…", "hourglass") }
         busy = true
+        captureArea = nil
 
         let handle: (CGImage?) -> Void = { [weak self] image in
             self?.stopTrackingMouse()
@@ -123,6 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if previous, let area = lastArea ?? ScreenCapture.lastSelection() {
             mouseUpTime = Date()
+            captureArea = area
             ScreenCapture.rect(area, completion: handle)
         } else {
             startTrackingMouse()
@@ -133,14 +151,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func recognize(_ image: CGImage?, keepLineBreaks: Bool) {
         guard let image else { busy = false; return } // user pressed Esc
         let grabbed = Date()
+        let options = settings.formatOptions(keepLineBreaks: keepLineBreaks)
+        let area = (settings.directText && DirectText.isTrusted) ? captureArea : nil
+
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = OCR.recognize(image, keepLineBreaks: keepLineBreaks)
-            let ocrTime = Date().timeIntervalSince(grabbed)
-            DispatchQueue.main.async { self.deliver(result, ocrTime: ocrTime) }
+            // Direct Text reads the app's own text while OCR reads the pixels, in parallel.
+            var direct: String?
+            let directDone = DispatchGroup()
+            if let area {
+                directDone.enter()
+                DispatchQueue.global(qos: .userInitiated).async {
+                    direct = DirectText.text(in: area)
+                    directDone.leave()
+                }
+            }
+            var result = OCR.recognize(image, options: options)
+            directDone.wait()
+
+            // Use the app's text only when it matches what's visible (tables keep their columns).
+            if let direct, !result.raw.isEmpty, DirectText.agrees(direct: direct, ocr: result.raw) {
+                if case .table = result.kind {} else {
+                    result.text = TextFormatter.formatDirect(direct, kind: result.kind, options: options)
+                    result.isDirectText = true
+                }
+            }
+            let elapsed = Date().timeIntervalSince(grabbed)
+            DispatchQueue.main.async { self.deliver(result, elapsed: elapsed) }
         }
     }
 
-    private func deliver(_ result: OCRResult, ocrTime: TimeInterval) {
+    private func deliver(_ result: OCRResult, elapsed: TimeInterval) {
         busy = false
         guard !result.isEmpty else {
             toast("No text found", "text.viewfinder")
@@ -152,23 +192,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             output = settings.additiveBuffer.isEmpty ? output : settings.additiveBuffer + "\n" + output
             settings.additiveBuffer = output
         }
-        let pb = NSPasteboard.general
-        pb.clearContents()
-        pb.setString(output, forType: .string)
+        copyToClipboard(output)
 
         if let up = mouseUpTime {
             log.notice("""
                 selection → clipboard \(Date().timeIntervalSince(up), format: .fixed(precision: 3))s \
-                (ocr \(ocrTime, format: .fixed(precision: 3))s)
+                (recognition \(elapsed, format: .fixed(precision: 3))s, \(result.kind.label, privacy: .public)\
+                \(result.isDirectText ? ", direct text" : "", privacy: .public))
                 """)
         }
         mouseUpTime = nil
 
         if settings.playSound { NSSound(named: "Tink")?.play() }
-        if !result.codes.isEmpty {
-            toast(result.text.isEmpty ? "Copied QR / barcode" : "Copied text + QR / barcode", "qrcode")
-        } else {
-            toast(settings.additive ? "Added text" : "Copied text", "doc.on.clipboard")
+        if settings.showToast {
+            let actions = (settings.quickActions && !settings.additive) ? quickActions(for: result) : []
+            Toast.show(message(for: result), symbol: symbol(for: result), actions: actions)
         }
 
         if settings.openLinks {
@@ -184,12 +222,89 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func message(for result: OCRResult) -> String {
+        if settings.additive { return "Added text" }
+        if !result.codes.isEmpty { return result.text.isEmpty ? "Copied QR code" : "Copied text + QR code" }
+        if result.isDirectText { return "Copied exact text" }
+        switch result.kind {
+        case .code: return "Copied code"
+        case .table: return "Copied table"
+        case .prose: return "Copied text"
+        }
+    }
+
+    private func symbol(for result: OCRResult) -> String {
+        if !result.codes.isEmpty { return "qrcode" }
+        if result.isDirectText { return "checkmark.seal" }
+        switch result.kind {
+        case .code: return "chevron.left.forwardslash.chevron.right"
+        case .table: return "tablecells"
+        case .prose: return "doc.on.clipboard"
+        }
+    }
+
+    // MARK: Quick actions
+
+    /// One-click follow-ups offered in the bubble, chosen from what was captured.
+    private func quickActions(for result: OCRResult) -> [ToastAction] {
+        let text = result.text
+        var actions: [ToastAction] = []
+        let copy: (String, String) -> String? = { [weak self] value, confirmation in
+            self?.copyToClipboard(value)
+            return confirmation
+        }
+
+        if case .table(let rows) = result.kind {
+            actions.append(ToastAction(title: "Markdown") { copy(TextFormatter.markdownTable(rows), "Copied as Markdown") })
+        }
+
+        // Links, emails and phone numbers found in the text.
+        if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue
+                                              | NSTextCheckingResult.CheckingType.phoneNumber.rawValue) {
+            let matches = detector.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            if let link = matches.first(where: { $0.resultType == .link })?.url {
+                let isMail = link.scheme == "mailto"
+                actions.append(ToastAction(title: isMail ? "Email" : "Open Link") {
+                    NSWorkspace.shared.open(link)
+                    return nil
+                })
+            }
+            if let phone = matches.first(where: { $0.resultType == .phoneNumber })?.phoneNumber {
+                let digits = phone.filter { $0.isNumber || $0 == "+" }
+                if let url = URL(string: "tel:\(digits)") {
+                    actions.append(ToastAction(title: "Call") {
+                        NSWorkspace.shared.open(url)
+                        return nil
+                    })
+                }
+            }
+        }
+
+        if text.contains("\n") {
+            actions.append(ToastAction(title: "One Line") { copy(TextFormatter.oneLine(text), "Copied as one line") })
+        }
+        let numbers = TextFormatter.numbers(text)
+        if !numbers.isEmpty, numbers.joined(separator: " ") != text.trimmingCharacters(in: .whitespacesAndNewlines) {
+            actions.append(ToastAction(title: "Numbers") { copy(numbers.joined(separator: "\n"), "Copied numbers only") })
+        }
+        if !result.isDirectText, !result.raw.isEmpty, result.raw != text {
+            actions.append(ToastAction(title: "Original") { copy(result.raw, "Copied without formatting") })
+        }
+        return Array(actions.prefix(4))
+    }
+
+    private func copyToClipboard(_ text: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+    }
+
     private func toast(_ message: String, _ symbol: String) {
         if settings.showToast { Toast.show(message, symbol: symbol) }
     }
 
     /// Watches the drag the user makes in the crosshair so we know the exact area
-    /// (for "Capture Previous Area") and when they let go (for timing).
+    /// (for Direct Text and "Capture Previous Area") and when they let go (for timing).
     /// Global mouse monitors need no extra permission.
     private func startTrackingMouse() {
         dragStart = nil
@@ -200,10 +315,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.dragStart = p
             } else if let s = self.dragStart {
                 self.mouseUpTime = Date()
-                // Convert from Cocoa (bottom-left) to screen coordinates (top-left) for screencapture -R.
+                // Convert from Cocoa (bottom-left) to screen coordinates (top-left).
                 let top = NSScreen.screens.first?.frame.maxY ?? 0
                 let rect = CGRect(x: min(s.x, p.x), y: top - max(s.y, p.y), width: abs(p.x - s.x), height: abs(p.y - s.y))
-                if rect.width > 4, rect.height > 4 { self.lastArea = rect }
+                if rect.width > 4, rect.height > 4 {
+                    self.lastArea = rect
+                    self.captureArea = rect
+                }
             }
         }
     }
