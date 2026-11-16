@@ -4,7 +4,7 @@ Free, open-source screen text capture for macOS. Press a shortcut, drag over any
 screen (a video, an image, a PDF, a locked web page), and the text is on your clipboard.
 
 Everything runs on your Mac with Apple's built-in Vision text recognition. Nothing is
-uploaded, there's no account, and the app is an ~1 MB menu-bar utility.
+uploaded, there's no account, and the app is a 1.5 MB menu-bar utility.
 
 ## What makes it different
 
