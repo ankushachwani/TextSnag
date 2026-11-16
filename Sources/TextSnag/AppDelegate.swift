@@ -267,15 +267,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func item(_ title: String, _ action: Selector, shortcut: Shortcut? = nil) -> NSMenuItem {
         let mi = NSMenuItem(title: title, action: action, keyEquivalent: "")
         mi.target = self
-        if let shortcut {
-            // Show the global shortcut on the right like a normal menu shortcut.
-            let attributed = NSMutableAttributedString(string: title)
-            attributed.append(NSAttributedString(string: "\t" + shortcut.displayString,
-                                                 attributes: [.foregroundColor: NSColor.secondaryLabelColor]))
-            let style = NSMutableParagraphStyle()
-            style.tabStops = [NSTextTab(textAlignment: .right, location: 230)]
-            attributed.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: attributed.length))
-            mi.attributedTitle = attributed
+        if let equivalent = shortcut?.menuKeyEquivalent {
+            // Shown on the right like any menu shortcut. Pressing it while the menu is open
+            // runs the same action as the global shortcut.
+            mi.keyEquivalent = equivalent.key
+            mi.keyEquivalentModifierMask = equivalent.modifiers
         }
         return mi
     }

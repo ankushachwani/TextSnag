@@ -55,6 +55,13 @@ enum CLI {
         let sc = Shortcut.defaultCapture
         check("default shortcut is ⌥⌘5", sc.displayString == "⌥⌘5", sc.displayString)
 
+        _ = NSApplication.shared
+        let menu = NSMenu()
+        AppDelegate().menuNeedsUpdate(menu)
+        let titles = menu.items.filter { !$0.isSeparatorItem }.map(\.title)
+        check("menu bar menu is compact", menu.size.width < 300,
+              String(format: "%.0fpt wide, %d items: %@", menu.size.width, titles.count, titles.joined(separator: " · ")))
+
         print(failures == 0 ? "\nAll checks passed." : "\n\(failures) check(s) failed.")
         return failures == 0 ? 0 : 1
     }

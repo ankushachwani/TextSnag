@@ -40,6 +40,32 @@ struct Shortcut: Codable, Equatable {
         return s + Self.keyName(Int(keyCode))
     }
 
+    /// For showing the shortcut in a menu the native way (right-aligned, compact).
+    var menuKeyEquivalent: (key: String, modifiers: NSEvent.ModifierFlags)? {
+        var flags: NSEvent.ModifierFlags = []
+        if modifiers & UInt32(cmdKey) != 0 { flags.insert(.command) }
+        if modifiers & UInt32(optionKey) != 0 { flags.insert(.option) }
+        if modifiers & UInt32(controlKey) != 0 { flags.insert(.control) }
+        if modifiers & UInt32(shiftKey) != 0 { flags.insert(.shift) }
+
+        let code = Int(keyCode)
+        let fKeys = [kVK_F1, kVK_F2, kVK_F3, kVK_F4, kVK_F5, kVK_F6, kVK_F7, kVK_F8, kVK_F9, kVK_F10,
+                     kVK_F11, kVK_F12, kVK_F13, kVK_F14, kVK_F15, kVK_F16, kVK_F17, kVK_F18, kVK_F19, kVK_F20]
+        if let i = fKeys.firstIndex(of: code), let scalar = UnicodeScalar(NSF1FunctionKey + i) {
+            return (String(Character(scalar)), flags)
+        }
+        let specials: [Int: Int] = [
+            kVK_Space: 0x20, kVK_Return: 0x0D, kVK_Tab: 0x09, kVK_Delete: 0x08, kVK_Escape: 0x1B,
+            kVK_ForwardDelete: NSDeleteFunctionKey, kVK_LeftArrow: NSLeftArrowFunctionKey,
+            kVK_RightArrow: NSRightArrowFunctionKey, kVK_UpArrow: NSUpArrowFunctionKey,
+            kVK_DownArrow: NSDownArrowFunctionKey, kVK_Home: NSHomeFunctionKey, kVK_End: NSEndFunctionKey,
+            kVK_PageUp: NSPageUpFunctionKey, kVK_PageDown: NSPageDownFunctionKey,
+        ]
+        if let u = specials[code], let scalar = UnicodeScalar(u) { return (String(Character(scalar)), flags) }
+        let name = Self.keyName(code)
+        return name.count == 1 ? (name.lowercased(), flags) : nil
+    }
+
     private static let functionKeys: [Int: String] = [
         kVK_F1: "F1", kVK_F2: "F2", kVK_F3: "F3", kVK_F4: "F4", kVK_F5: "F5", kVK_F6: "F6",
         kVK_F7: "F7", kVK_F8: "F8", kVK_F9: "F9", kVK_F10: "F10", kVK_F11: "F11", kVK_F12: "F12",
