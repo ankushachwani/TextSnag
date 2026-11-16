@@ -1,16 +1,26 @@
 import AppKit
 import SwiftUI
 
+/// A standard macOS preferences window: icon tabs in the toolbar, no scrolling, and the
+/// window resizes to fit each pane.
 final class SettingsWindow {
     static let shared = SettingsWindow()
     private var window: NSWindow?
 
     func show() {
         if window == nil {
-            let w = NSWindow(contentViewController: NSHostingController(rootView: SettingsView()))
-            w.title = "TextSnag Settings"
+            let savedTab = min(UserDefaults.standard.integer(forKey: "settingsTab"), 2) // read before tabs are added
+            let tabs = SettingsTabController()
+            tabs.tabStyle = .toolbar
+            tabs.addPane("General", "gearshape", GeneralPane())
+            tabs.addPane("Shortcuts", "keyboard", ShortcutsPane())
+            tabs.addPane("About", "info.circle", AboutPane())
+
+            let w = NSWindow(contentViewController: tabs)
             w.styleMask = [.titled, .closable]
+            w.toolbarStyle = .preference
             w.isReleasedWhenClosed = false
+            tabs.selectedTabViewItemIndex = savedTab
             w.center()
             window = w
         }
@@ -19,78 +29,171 @@ final class SettingsWindow {
     }
 }
 
-struct SettingsView: View {
+private final class SettingsTabController: NSTabViewController {
+    func addPane<V: View>(_ title: String, _ symbol: String, _ view: V) {
+        let host = NSHostingController(rootView: view)
+        host.sizingOptions = [.preferredContentSize]
+        host.title = title
+        let item = NSTabViewItem(viewController: host)
+        item.label = title
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        addTabViewItem(item)
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        fitWindow(animated: false)
+    }
+
+    override func tabView(_ tabView: NSTabView, didSelect item: NSTabViewItem?) {
+        super.tabView(tabView, didSelect: item)
+        UserDefaults.standard.set(selectedTabViewItemIndex, forKey: "settingsTab")
+        view.window?.title = item?.label ?? "Settings"
+        fitWindow(animated: true)
+    }
+
+    /// Resize the window to the selected pane, keeping its top edge in place.
+    private func fitWindow(animated: Bool) {
+        guard let window = view.window, selectedTabViewItemIndex >= 0,
+              let vc = tabViewItems[selectedTabViewItemIndex].viewController else { return }
+        window.title = tabViewItems[selectedTabViewItemIndex].label
+        let size = vc.view.fittingSize
+        let content = window.contentRect(forFrameRect: window.frame)
+        var frame = window.frameRect(forContentRect: NSRect(x: content.minX, y: content.maxY - size.height,
+                                                            width: size.width, height: size.height))
+        frame.origin.x = window.frame.midX - frame.width / 2
+        window.setFrame(frame, display: true, animate: animated)
+    }
+}
+
+// MARK: - Panes
+
+private let labelWidth: CGFloat = 130
+
+/// A right-aligned label column next to controls, like macOS's own settings panes.
+private struct Row<Content: View>: View {
+    let label: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        GridRow(alignment: .firstTextBaseline) {
+            Text(label.isEmpty ? "" : label + ":")
+                .frame(width: labelWidth, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 6) { content }
+        }
+    }
+}
+
+private struct Hint: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+private struct GeneralPane: View {
     @ObservedObject private var settings = Settings.shared
 
     var body: some View {
-        TabView {
-            general.tabItem { Label("General", systemImage: "gearshape") }
-            shortcuts.tabItem { Label("Shortcuts", systemImage: "keyboard") }
-            about.tabItem { Label("About", systemImage: "info.circle") }
-        }
-        .padding(20)
-        .frame(width: 480)
-    }
-
-    private var general: some View {
-        Form {
-            Section {
+        Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 14) {
+            Row(label: "Text") {
                 Toggle("Keep line breaks", isOn: $settings.keepLineBreaks)
-                Text("Off: lines are joined into paragraphs.").font(.caption).foregroundStyle(.secondary)
+                Hint("When off, lines are joined into paragraphs.")
+            }
+            Row(label: "Clipboard") {
                 Toggle("Additive clipboard", isOn: $settings.additive)
-                HStack {
-                    Text("Each capture is added to the previous ones instead of replacing them.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Clear") { settings.additiveBuffer = "" }
+                Hint("Each capture is added after the previous ones.")
+                if settings.additive {
+                    Button("Clear Additive Clipboard") { settings.additiveBuffer = "" }
                         .disabled(settings.additiveBuffer.isEmpty)
                 }
             }
-            Section {
-                Toggle("Read text aloud after capture", isOn: $settings.speak)
-                Toggle("Open links from QR codes", isOn: $settings.openLinks)
+            Divider().gridCellColumns(2)
+            Row(label: "After capture") {
                 Toggle("Show “Copied” bubble", isOn: $settings.showToast)
-                Toggle("Play sound on capture", isOn: $settings.playSound)
+                Toggle("Play sound", isOn: $settings.playSound)
+                Toggle("Read text aloud", isOn: $settings.speak)
+                Toggle("Open links from QR codes", isOn: $settings.openLinks)
+            }
+            Divider().gridCellColumns(2)
+            Row(label: "Startup") {
                 Toggle("Launch at login", isOn: Binding(get: { settings.launchAtLogin },
                                                         set: { settings.launchAtLogin = $0 }))
             }
         }
-        .formStyle(.grouped)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 24)
+        .frame(width: 460, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
     }
+}
 
-    private var shortcuts: some View {
-        Form {
-            Section {
+private struct ShortcutsPane: View {
+    @ObservedObject private var settings = Settings.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
                 ForEach(ShortcutAction.allCases) { action in
-                    HStack {
-                        Text(action.title)
-                        Spacer()
-                        ShortcutRecorder(shortcut: Binding(
-                            get: { settings.shortcut(for: action) },
-                            set: { settings.setShortcut($0, for: action) }))
-                            .frame(width: 150, height: 24)
+                    GridRow(alignment: .center) {
+                        Text(action.title + ":")
+                            .frame(width: 210, alignment: .trailing)
+                        HStack(spacing: 6) {
+                            ShortcutRecorder(shortcut: Binding(
+                                get: { settings.shortcut(for: action) },
+                                set: { settings.setShortcut($0, for: action) }))
+                                .frame(width: 140, height: 24)
+                            Button {
+                                settings.setShortcut(nil, for: action)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Remove shortcut")
+                            .opacity(settings.shortcut(for: action) == nil ? 0 : 1)
+                        }
                     }
                 }
-            } footer: {
-                Text("Click a box, then press the keys. Use ⌘, ⌥ or ⌃ (or an F-key). Esc cancels, ⌫ clears.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
+            Hint("Click a box and press the keys you want. Shortcuts need ⌘, ⌥ or ⌃ (or an F-key). Press Esc to cancel.")
+                .frame(maxWidth: .infinity, alignment: .center)
+                .multilineTextAlignment(.center)
         }
-        .formStyle(.grouped)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 24)
+        .frame(width: 460)
+        .fixedSize(horizontal: false, vertical: true)
     }
+}
 
-    private var about: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "text.viewfinder").font(.system(size: 40))
+private struct AboutPane: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            if Bundle.main.url(forResource: "AppIcon", withExtension: "icns") != nil {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .frame(width: 72, height: 72)
+            } else {
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 52, weight: .light))
+                    .frame(width: 72, height: 72)
+            }
             Text("TextSnag").font(.title2.bold())
             Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev")")
                 .foregroundStyle(.secondary)
-            Text("Free, open-source screen text capture for macOS.\nEverything runs on your Mac; nothing is uploaded.")
-                .multilineTextAlignment(.center).font(.callout)
+            Text("Free, open-source screen text capture for macOS.\nEverything runs on your Mac. Nothing is uploaded.")
+                .multilineTextAlignment(.center)
+                .font(.callout)
+                .padding(.top, 4)
         }
-        .frame(maxWidth: .infinity, minHeight: 200)
+        .padding(28)
+        .frame(width: 460)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
+
+// MARK: - Shortcut recorder
 
 /// A button that records the next key combination pressed.
 struct ShortcutRecorder: NSViewRepresentable {

@@ -39,9 +39,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             log.notice("warm-up took \(Date().timeIntervalSince(t), format: .fixed(precision: 3))s")
         }
 
+        NSApp.mainMenu = makeMainMenu()
+
         if !CGPreflightScreenCaptureAccess() {
             CGRequestScreenCaptureAccess()
         }
+
+        if !UserDefaults.standard.bool(forKey: "hasLaunchedBefore") {
+            UserDefaults.standard.set(true, forKey: "hasLaunchedBefore")
+            let combo = settings.shortcut(for: .capture)?.displayString ?? "the menu bar icon"
+            Toast.show("TextSnag is in your menu bar. Press \(combo) to capture text.", symbol: "text.viewfinder")
+        }
+    }
+
+    /// Opening the app again (e.g. double-clicking it in Applications) shows Settings.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        SettingsWindow.shared.show()
+        return false
+    }
+
+    /// Menu-bar apps have no visible main menu, but it's what makes ⌘W / ⌘Q / ⌘C work in the
+    /// Settings window.
+    private func makeMainMenu() -> NSMenu {
+        let main = NSMenu()
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",").target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit TextSnag", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+        main.addItem(appItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+        main.addItem(editItem)
+
+        let windowItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowItem.submenu = windowMenu
+        main.addItem(windowItem)
+        return main
     }
 
     private func registerHotKeys() {
