@@ -12,11 +12,18 @@ final class Toast {
     private static var panel: NSPanel?
     private static var hideWork: DispatchWorkItem?
     private static var targets: [ActionTarget] = []
+    private static var pasteMonitor: Any?
+    private static var clipboardTimer: Timer?
+    private static var deadline = Date()
+
+    /// How long the bubble stays when it has quick actions (unless you paste first).
+    static let actionsLifetime: TimeInterval = 15
 
     static func show(_ message: String, symbol: String = "doc.on.clipboard", actions: [ToastAction] = []) {
         hideWork?.cancel()
         panel?.orderOut(nil)
         targets = []
+        stopWatchingForPaste()
 
         let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
         icon.contentTintColor = .labelColor
@@ -84,19 +91,49 @@ final class Toast {
         p.orderFrontRegardless()
         panel = p
 
-        let delay: TimeInterval = actions.isEmpty ? 1.4 : 4
-        content.onHover = { inside in
-            if inside { hideWork?.cancel() } else { scheduleHide(after: 1.2) }
+        if actions.isEmpty {
+            scheduleHide(after: 1.4)
+        } else {
+            // Quick actions stay until you paste, copy something else, or 15 s pass.
+            deadline = Date().addingTimeInterval(actionsLifetime)
+            scheduleHide(after: actionsLifetime)
+            watchForPaste()
+            content.onHover = { inside in
+                if inside { hideWork?.cancel() } else { scheduleHide(after: max(2, deadline.timeIntervalSinceNow)) }
+            }
         }
-        scheduleHide(after: delay)
     }
 
     static func dismiss() { scheduleHide(after: 0) }
+
+    /// ⌘V anywhere closes the bubble. Seeing key presses in other apps needs the
+    /// Accessibility permission (the same one Direct Text uses); without it the bubble
+    /// simply stays its full time. Copying something else also closes it.
+    private static func watchForPaste() {
+        pasteMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
+            let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            if mods == .command, event.charactersIgnoringModifiers?.lowercased() == "v" {
+                DispatchQueue.main.async { scheduleHide(after: 0.3) }
+            }
+        }
+        let startCount = NSPasteboard.general.changeCount
+        clipboardTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            if NSPasteboard.general.changeCount != startCount { scheduleHide(after: 0) }
+        }
+    }
+
+    private static func stopWatchingForPaste() {
+        if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
+        pasteMonitor = nil
+        clipboardTimer?.invalidate()
+        clipboardTimer = nil
+    }
 
     private static func scheduleHide(after delay: TimeInterval) {
         hideWork?.cancel()
         guard let p = panel else { return }
         let work = DispatchWorkItem {
+            stopWatchingForPaste()
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.25
                 p.animator().alphaValue = 0
