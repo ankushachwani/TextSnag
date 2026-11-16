@@ -168,8 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if !result.codes.isEmpty {
             toast(result.text.isEmpty ? "Copied QR / barcode" : "Copied text + QR / barcode", "qrcode")
         } else {
-            let n = result.text.count
-            toast(settings.additive ? "Added \(n) characters" : "Copied \(n) characters", "doc.on.clipboard")
+            toast(settings.additive ? "Added text" : "Copied text", "doc.on.clipboard")
         }
 
         if settings.openLinks {
