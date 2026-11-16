@@ -69,21 +69,9 @@ enum DirectText {
     /// True when the app's text and the OCR text describe the same words, allowing for some
     /// OCR mistakes. Guards against hidden, off-screen, or partially selected text.
     static func agrees(direct: String, ocr: String) -> Bool {
-        // Compare letter pairs (Dice similarity) rather than whole words, so one misread
-        // letter ("nurnber") barely matters but extra hidden text clearly does.
-        func pairs(_ s: String) -> [String: Int] {
-            let chars = Array(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
-            var counts: [String: Int] = [:]
-            if chars.count >= 2 {
-                for i in 0..<(chars.count - 1) { counts[String(chars[i]) + String(chars[i + 1]), default: 0] += 1 }
-            }
-            return counts
-        }
-        let a = pairs(direct), b = pairs(ocr)
-        let total = a.values.reduce(0, +) + b.values.reduce(0, +)
-        guard total > 0, !a.isEmpty, !b.isEmpty else { return false }
-        let shared = a.reduce(0) { $0 + min($1.value, b[$1.key] ?? 0) }
-        return Double(2 * shared) / Double(total) >= 0.8
+        // Letter-pair similarity rather than whole words: one misread letter ("nurnber")
+        // barely matters, but extra hidden text clearly does.
+        TextFormatter.similarity(direct, ocr) >= 0.8
     }
 
     // MARK: - Private

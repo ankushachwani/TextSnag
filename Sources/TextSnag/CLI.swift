@@ -15,11 +15,51 @@ enum CLI {
             var options = FormatOptions()
             options.keepLineBreaks = !args.contains("--no-line-breaks")
             let result = OCR.recognize(image, options: options)
-            print(result.combined)
+            print(args.contains("--raw") ? result.raw : result.combined)
             fputs(String(format: "(%@, recognized in %.3fs)\n", result.kind.label, Date().timeIntervalSince(start)), stderr)
             return result.isEmpty ? 1 : 0
+        case "--lines":
+            // Debug: what Vision returned, line by line, with left edges.
+            guard args.count >= 2, let image = ScreenCapture.loadImage(args[1]) else { return 2 }
+            OCR.warmUp()
+            for l in OCR.readLines(image, correction: true) {
+                print(String(format: "x=%.3f w=%.3f h=%.3f  %@", l.box.minX, l.box.width, l.box.height, l.string))
+            }
+            return 0
+        case "--write-list-sample":
+            let lines = ["• Fruit", "◦ Apples and pears", "◦ Bananas", "• Vegetables", "◦ Carrots", "▪ Organic only",
+                         "1. First step", "2. Second step"]
+            let img = OCR.sampleImage(lines, scale: 2, indents: [0, 4, 4, 0, 4, 8, 0, 0])
+            let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: args[1]) as CFURL, "public.png" as CFString, 1, nil)!
+            CGImageDestinationAddImage(dest, img, nil)
+            return CGImageDestinationFinalize(dest) ? 0 : 1
         case "--selftest":
             return selfTest()
+        case "--paste-test":
+            // Copies through the paste-detecting clipboard, then pastes from another process
+            // (pbpaste) and checks TextSnag noticed. Restores the clipboard afterwards.
+            let saved = NSPasteboard.general.string(forType: .string)
+            var pasted = false
+            let watcher = PasteWatcher(text: "TextSnag paste test\n    ◦ indented") { pasted = true }
+            let item = NSPasteboardItem()
+            item.setDataProvider(watcher, forTypes: [.string])
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects([item])
+            CFRunLoopRunInMode(.defaultMode, 1.0, false) // a real paste comes after a moment
+            let pipe = Pipe()
+            let pb = Process()
+            pb.executableURL = URL(fileURLWithPath: "/usr/bin/pbpaste")
+            pb.standardOutput = pipe
+            try? pb.run()
+            let deadline = Date().addingTimeInterval(5)
+            while pb.isRunning && Date() < deadline { CFRunLoopRunInMode(.defaultMode, 0.05, false) }
+            CFRunLoopRunInMode(.defaultMode, 0.2, false)
+            let got = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            NSPasteboard.general.clearContents()
+            if let saved { NSPasteboard.general.setString(saved, forType: .string) }
+            let ok = pasted && got == "TextSnag paste test\n    ◦ indented"
+            print("\(ok ? "PASS" : "FAIL")  paste detected: \(pasted), pasted text intact: \(got == "TextSnag paste test\n    ◦ indented")")
+            return ok ? 0 : 1
         case "--capture-test":
             // End-to-end without the mouse: grab a screen area with screencapture, read it,
             // report size and timing only (the text itself isn't printed).
@@ -107,8 +147,9 @@ enum CLI {
             check("detected as table", true, "\(rows.count) rows × \(rows.first?.count ?? 0) columns")
             check("rows and columns", rows.count == 4 && rows.allSatisfy { $0.count == 3 } && rows[2][0] == "Bananas"
                   && rows[3][1] == "1", show(table.text))
-            check("copied tab-separated for spreadsheets", table.text.hasPrefix("Name\tQty\tPrice"), show(table.text))
-            check("Markdown table action", TextFormatter.markdownTable(rows).hasPrefix("| Name | Qty | Price |\n| --- |"))
+            check("plain text drawn as a table", table.text.hasPrefix("| Name     | Qty | Price |\n| -------- | --- | ----- |"), show(table.text))
+            check("HTML table for Docs, Notes, Sheets…", TextFormatter.htmlTable(rows).contains("<th style=\"border:1px solid #bbb;padding:4px 8px;text-align:left\">Name</th>"))
+            check("Not a Table action", TextFormatter.plainRows(rows).hasPrefix("Name Qty Price\nApples 3 $1.20"), show(TextFormatter.plainRows(rows)))
         } else {
             check("detected as table", false, "\(table.kind.label): \(show(table.text))")
         }
@@ -116,10 +157,38 @@ enum CLI {
                                                        "a third, with no columns at all."]))
         check("ordinary text is not mistaken for a table", paragraph.kind == .prose, paragraph.kind.label)
 
+        // Lists
+        print("\n— Lists")
+        let listLines = ["• Fruit", "◦ Apples and pears", "◦ Bananas", "• Vegetables", "◦ Carrots", "▪ Organic only",
+                         "1. First step", "2. Second step"]
+        let listIndents = [0, 4, 4, 0, 4, 8, 0, 0]
+        let expectedList = "• Fruit\n    ◦ Apples and pears\n    ◦ Bananas\n• Vegetables\n    ◦ Carrots\n        ▪ Organic only\n1. First step\n2. Second step"
+        let list = OCR.recognize(OCR.sampleImage(listLines, scale: 2, indents: listIndents))
+        check("bullets, styles and nesting kept", list.text == expectedList, show(list.text))
+        let direct = TextFormatter.formatDirect("•\nFruit\n•\nApples and pears\n•\nBananas", ocrText: "• Fruit\n    ◦ Apples and pears\n    ◦ Bananas",
+                                                kind: .prose, options: FormatOptions())
+        check("Direct Text keeps bullets and indentation", direct == "• Fruit\n    ◦ Apples and pears\n    ◦ Bananas", show(direct))
+
+        let sampleRows = [["Name", "Qty"], ["Apples", "3"], ["Bananas", "12"]]
+        let html = TextFormatter.htmlTable(sampleRows).data(using: .utf8)!
+        let parsed = try? NSAttributedString(data: html, options: [.documentType: NSAttributedString.DocumentType.html,
+                                                                  .characterEncoding: String.Encoding.utf8.rawValue],
+                                             documentAttributes: nil)
+        let cells = parsed.map { str -> Int in
+            var blocks = Set<ObjectIdentifier>()
+            str.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: str.length)) { value, _, _ in
+                for block in (value as? NSParagraphStyle)?.textBlocks ?? [] where block is NSTextTableBlock {
+                    blocks.insert(ObjectIdentifier(block))
+                }
+            }
+            return blocks.count
+        } ?? 0
+        check("macOS reads the copied table as a real table", cells == 6, "\(cells) table cells")
+
         // Formatting rules
         print("\n— Formatting")
-        check("tidy bullets", ["● one", "▪ two", "- three", "* four", "•five"].map(TextFormatter.tidyBullet)
-              == ["• one", "• two", "• three", "• four", "• five"])
+        check("tidy bullets", ["● one", "▪ two", "- three", "* four", "•five", "◦ six"].map(TextFormatter.tidyBullet)
+              == ["• one", "▪ two", "• three", "• four", "• five", "◦ six"])
         check("hyphens and numbers are not bullets", TextFormatter.tidyBullet("-5 degrees") == "-5 degrees"
               && TextFormatter.tidyBullet("*args") == "*args")
         let fixed = TextFormatter.fixPunctuation("Hello , world ( yes ) one,two 1,000  done . . .")

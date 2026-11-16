@@ -161,7 +161,7 @@ private struct FormattingPane: View {
                 Toggle("Code", isOn: $settings.detectCode)
                 Hint("Turns off autocorrect, keeps indentation, fixes quotes, handles dark terminals.")
                 Toggle("Tables", isOn: $settings.detectTables)
-                Hint("Copied as columns, ready to paste into Numbers, Excel or Sheets.")
+                Hint("Pastes as a real table in Docs, Notes, Mail, Numbers, Excel and Sheets, and as a neat text table in Messages or Slack. Turn off to always get plain lines.")
             }
             Divider().gridCellColumns(2)
             Row(label: "Text") {
@@ -169,7 +169,7 @@ private struct FormattingPane: View {
                 Hint("When off, lines are joined into paragraphs.")
                 Toggle("Keep indentation", isOn: $settings.keepIndentation)
                 Toggle("Tidy bullets", isOn: $settings.tidyBullets)
-                Hint("Every bullet style (●, ▪, -, *…) becomes •.")
+                Hint("Bullets are kept and follow their nesting level (•, ◦, ▪). Odd styles like ● or * become •.")
                 Toggle("Fix punctuation spacing", isOn: $settings.fixPunctuation)
                 Hint("“word ,word” becomes “word, word”.")
                 Toggle("Use straight quotes", isOn: $settings.straightQuotes)

@@ -34,11 +34,13 @@ enum OCR {
 
         var lines = readLines(image, correction: true)
         var kind = ContentKind.prose
-        if options.detectTables, let rows = TextFormatter.table(lines) {
-            kind = .table(rows)
+        if options.detectTables, let layout = TextFormatter.tableLayout(lines) {
+            kind = .table(fillEmptyCells(image, layout))
         } else if options.detectCode, TextFormatter.looksLikeCode(lines) {
             kind = .code
             lines = rereadAsCode(image, fallback: lines)
+        } else if options.tidyBullets || options.keepIndentation {
+            lines = restoreBullets(image, lines)
         }
         codesDone.wait()
 
@@ -86,17 +88,135 @@ enum OCR {
         return best.isEmpty ? fallback : best
     }
 
+    // MARK: Bullets
+
+    /// Vision skips small bullet dots, which also loses a list's nesting. Look just left of
+    /// where each line's text starts for a small dot or square; if there is one, it's a
+    /// bullet, and the line starts at the bullet.
+    private static func restoreBullets(_ image: CGImage, _ lines: [TextLine]) -> [TextLine] {
+        guard let gray = GrayImage(image) else { return lines }
+        let W = CGFloat(gray.width), H = CGFloat(gray.height)
+        return lines.map { line in
+            let s = line.string.trimmingCharacters(in: .whitespaces)
+            if TextFormatter.tidyBullet(s) != s || s.range(of: #"^(\d{1,3}|[a-zA-Z])[.)]\s"#, options: .regularExpression) != nil {
+                return line // already starts with a bullet or a number
+            }
+            let x0 = line.box.minX * W
+            let top = (1 - line.box.maxY) * H, bottom = (1 - line.box.minY) * H
+            let h = bottom - top
+            guard h > 6 else { return line }
+            let rowRange = Int(top + 0.12 * h)...Int(bottom - 0.08 * h)
+            let colRange = Int(max(0, x0 - 2.2 * h))...Int(max(0, x0 - 0.04 * h))
+            guard colRange.count > 2, let blob = gray.nearestBlob(columns: colRange, rows: rowRange, fromRight: true) else { return line }
+
+            let bw = CGFloat(blob.columns.count), bh = CGFloat(blob.rows.count)
+            let centerY = CGFloat(blob.rows.lowerBound + blob.rows.upperBound) / 2
+            let looksLikeBullet = (0.1 * h...0.6 * h).contains(bw) && (0.1 * h...0.6 * h).contains(bh)
+                && (0.5...2.0).contains(bw / bh) && (top + 0.2 * h...bottom - 0.1 * h).contains(centerY)
+                && blob.isolatedOnLeft
+            guard looksLikeBullet else { return line }
+            let minX = CGFloat(blob.columns.lowerBound) / W
+            let box = CGRect(x: minX, y: line.box.minY, width: line.box.maxX - minX, height: line.box.height)
+            return TextLine(string: "• " + s, box: box, confidence: line.confidence)
+        }
+    }
+
+    // MARK: Tables
+
+    /// Vision often drops a cell holding a single character ("1", "3"). Re-read each empty
+    /// cell on its own, cropped and enlarged.
+    private static func fillEmptyCells(_ image: CGImage, _ layout: TextFormatter.TableLayout) -> [[String]] {
+        var rows = layout.rows
+        var empty: [(Int, Int)] = []
+        for r in rows.indices { for c in rows[r].indices where rows[r][c].isEmpty { empty.append((r, c)) } }
+        guard !empty.isEmpty, empty.count <= 40 else { return rows }
+
+        let W = CGFloat(image.width), H = CGFloat(image.height)
+        var found = Array(repeating: "", count: empty.count)
+        DispatchQueue.concurrentPerform(iterations: empty.count) { i in
+            let (r, c) = empty[i]
+            let col = layout.columns[c], band = layout.bands[r]
+            // The column's extent between its neighbours, and the row's band, with some margin.
+            let left = c > 0 ? (layout.columns[c - 1].upperBound + col.lowerBound) / 2 : max(0, col.lowerBound - 0.02)
+            let right = c + 1 < layout.columns.count ? (col.upperBound + layout.columns[c + 1].lowerBound) / 2 : min(1, col.upperBound + 0.02)
+            let pad = (band.upperBound - band.lowerBound) * 0.3
+            let rect = CGRect(x: left * W, y: (1 - band.upperBound - pad) * H,
+                              width: (right - left) * W, height: (band.upperBound - band.lowerBound + 2 * pad) * H)
+                .intersection(CGRect(x: 0, y: 0, width: W, height: H)).integral
+            guard rect.width > 2, rect.height > 2, let crop = image.cropping(to: rect), let big = enlarged(crop, by: 3) else { return }
+            let text = readLines(big, correction: false).map(\.string).joined(separator: " ")
+            found[i] = text.trimmingCharacters(in: .whitespaces)
+        }
+        for (i, (r, c)) in empty.enumerated() where !found[i].isEmpty { rows[r][c] = found[i] }
+        return rows
+    }
+
+    /// Scales up and pads with the image's own background, so a lone character is big
+    /// enough for Vision to notice.
+    private static func enlarged(_ image: CGImage, by factor: CGFloat) -> CGImage? {
+        let pad: CGFloat = 24
+        let w = Int(CGFloat(image.width) * factor + 2 * pad), h = Int(CGFloat(image.height) * factor + 2 * pad)
+        guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        let corner = GrayImage(image).map { $0.pixel(0, 0) } ?? 255
+        ctx.setFillColor(gray: CGFloat(corner) / 255, alpha: 1)
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: pad, y: pad, width: CGFloat(image.width) * factor, height: CGFloat(image.height) * factor))
+        return ctx.makeImage()
+    }
+
+    /// Apple's newest accurate model (revision 3) sometimes breaks on macOS 27 and fails
+    /// every request until a restart ("e5rt … Code 13"); other apps then silently get
+    /// worse text. When that happens, use the previous accurate model (revision 2), and only
+    /// as a last resort the fast one. Revision 3 is retried every couple of minutes.
+    private static let modelLock = NSLock()
+    private static var newestBrokenAt: Date?
+
     static func readLines(_ image: CGImage, correction: Bool) -> [TextLine] {
+        modelLock.lock()
+        let skipNewest = newestBrokenAt.map { Date().timeIntervalSince($0) < 120 } ?? false
+        modelLock.unlock()
+
+        if !skipNewest {
+            let request = textRequest(revision: VNRecognizeTextRequestRevision3, correction: correction)
+            do {
+                try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+                return lines(from: request)
+            } catch {
+                debugLog("revision 3 failed: \(error)")
+            }
+            modelLock.lock()
+            newestBrokenAt = Date()
+            modelLock.unlock()
+        }
+        let previous = textRequest(revision: VNRecognizeTextRequestRevision2, correction: correction)
+        do {
+            try VNImageRequestHandler(cgImage: image, options: [:]).perform([previous])
+            return lines(from: previous)
+        } catch {
+            debugLog("revision 2 failed: \(error)")
+        }
+        let fast = textRequest(revision: VNRecognizeTextRequestRevision3, correction: correction)
+        fast.recognitionLevel = .fast
+        try? VNImageRequestHandler(cgImage: image, options: [:]).perform([fast])
+        return lines(from: fast)
+    }
+
+    private static func textRequest(revision: Int, correction: Bool) -> VNRecognizeTextRequest {
         let request = VNRecognizeTextRequest()
+        request.revision = revision
         request.recognitionLevel = .accurate
         request.usesLanguageCorrection = correction
-        if #available(macOS 13.0, *) { request.automaticallyDetectsLanguage = true }
-        if (try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])) == nil {
-            // Accurate model unavailable: fall back to the fast one rather than returning nothing.
-            request.recognitionLevel = .fast
-            try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        if revision >= VNRecognizeTextRequestRevision3, #available(macOS 13.0, *) {
+            request.automaticallyDetectsLanguage = true
         }
-        return (request.results ?? []).compactMap { obs in
+        return request
+    }
+
+    private static func lines(from request: VNRecognizeTextRequest) -> [TextLine] {
+        (request.results ?? []).compactMap { obs in
             guard let c = obs.topCandidates(1).first else { return nil }
             return TextLine(string: c.string, box: obs.boundingBox, confidence: c.confidence)
         }
@@ -155,4 +275,67 @@ enum OCR {
         NSGraphicsContext.restoreGraphicsState()
         return rep.cgImage!
     }
+}
+
+/// An 8-bit grayscale copy of an image, for quick pixel checks.
+private struct GrayImage {
+    let width: Int, height: Int
+    private let pixels: [UInt8]
+
+    init?(_ image: CGImage) {
+        let w = image.width, h = image.height
+        var buffer = [UInt8](repeating: 0, count: w * h)
+        let ok = buffer.withUnsafeMutableBytes { raw -> Bool in
+            guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                                      bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard ok else { return nil }
+        width = w
+        height = h
+        pixels = buffer
+    }
+
+    /// Top-left origin.
+    func pixel(_ x: Int, _ y: Int) -> UInt8 { pixels[min(max(y, 0), height - 1) * width + min(max(x, 0), width - 1)] }
+
+    struct Blob {
+        let columns: ClosedRange<Int>
+        let rows: ClosedRange<Int>
+        let isolatedOnLeft: Bool // no other ink between it and the left edge of the search area
+    }
+
+    /// The run of "ink" columns closest to the right (or left) edge of the area, where ink
+    /// is anything clearly different from the area's background.
+    func nearestBlob(columns: ClosedRange<Int>, rows: ClosedRange<Int>, fromRight: Bool) -> Blob? {
+        let cols = columns.clamped(to: 0...(width - 1)), rws = rows.clamped(to: 0...(height - 1))
+        guard cols.count > 1, rws.count > 1 else { return nil }
+        // Background: the most common brightness in the area.
+        var histogram = [Int](repeating: 0, count: 256)
+        for y in rws { for x in cols { histogram[Int(pixel(x, y))] += 1 } }
+        let background = histogram.indices.max { histogram[$0] < histogram[$1] } ?? 255
+        func ink(_ x: Int, _ y: Int) -> Bool { abs(Int(pixel(x, y)) - background) > 70 }
+        let inkColumns = cols.map { x in rws.contains { ink(x, $0) } }
+
+        let order = fromRight ? Array(inkColumns.indices.reversed()) : Array(inkColumns.indices)
+        guard let first = order.first(where: { inkColumns[$0] }) else { return nil }
+        var last = first
+        for i in order.drop(while: { $0 != first }).dropFirst() {
+            guard inkColumns[i] else { break }
+            last = i
+        }
+        let lo = min(first, last), hi = max(first, last)
+        let x0 = cols.lowerBound + lo, x1 = cols.lowerBound + hi
+        let inkRows = rws.filter { y in (x0...x1).contains { ink($0, y) } }
+        guard let r0 = inkRows.first, let r1 = inkRows.last else { return nil }
+        let others = fromRight ? inkColumns[..<lo].contains(true) : inkColumns[(hi + 1)...].contains(true)
+        return Blob(columns: x0...x1, rows: r0...r1, isolatedOnLeft: !others)
+    }
+}
+
+/// Set TEXTSNAG_DEBUG=1 to print recognition fallbacks to stderr.
+func debugLog(_ message: @autoclosure () -> String) {
+    if ProcessInfo.processInfo.environment["TEXTSNAG_DEBUG"] != nil { fputs("[TextSnag] \(message())\n", stderr) }
 }

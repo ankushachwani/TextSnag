@@ -12,7 +12,6 @@ final class Toast {
     private static var panel: NSPanel?
     private static var hideWork: DispatchWorkItem?
     private static var targets: [ActionTarget] = []
-    private static var pasteMonitor: Any?
     private static var clipboardTimer: Timer?
     private static var deadline = Date()
 
@@ -94,7 +93,8 @@ final class Toast {
         if actions.isEmpty {
             scheduleHide(after: 1.4)
         } else {
-            // Quick actions stay until you paste, copy something else, or 15 s pass.
+            // Quick actions stay 15 s, or until a few seconds after you paste, or until you
+            // copy something else.
             deadline = Date().addingTimeInterval(actionsLifetime)
             scheduleHide(after: actionsLifetime)
             watchForPaste()
@@ -106,25 +106,24 @@ final class Toast {
 
     static func dismiss() { scheduleHide(after: 0) }
 
-    /// ⌘V anywhere closes the bubble. Seeing key presses in other apps needs the
-    /// Accessibility permission (the same one Direct Text uses); without it the bubble
-    /// simply stays its full time. Copying something else also closes it.
+    /// Copying something else closes the bubble (its buttons would act on the old capture).
     private static func watchForPaste() {
-        pasteMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { event in
-            let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
-            if mods == .command, event.charactersIgnoringModifiers?.lowercased() == "v" {
-                DispatchQueue.main.async { scheduleHide(after: 0.3) }
-            }
-        }
         let startCount = NSPasteboard.general.changeCount
         clipboardTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             if NSPasteboard.general.changeCount != startCount { scheduleHide(after: 0) }
         }
     }
 
+    /// Called when the captured text is pasted somewhere: keep the buttons a few more
+    /// seconds, then fade.
+    static let afterPasteLifetime: TimeInterval = 4
+    static func pasted() {
+        guard panel?.isVisible == true, !targets.isEmpty else { return }
+        deadline = Date().addingTimeInterval(afterPasteLifetime)
+        scheduleHide(after: afterPasteLifetime)
+    }
+
     private static func stopWatchingForPaste() {
-        if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
-        pasteMonitor = nil
         clipboardTimer?.invalidate()
         clipboardTimer = nil
     }

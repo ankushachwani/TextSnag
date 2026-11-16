@@ -35,8 +35,17 @@ enum ContentKind: Equatable {
 enum TextFormatter {
     // MARK: - Detection
 
+    /// A detected table: cell text plus where its columns and rows are (normalized).
+    struct TableLayout {
+        var rows: [[String]]
+        var columns: [ClosedRange<CGFloat>]
+        var bands: [ClosedRange<CGFloat>] // each row's vertical extent
+    }
+
+    static func table(_ lines: [TextLine]) -> [[String]]? { tableLayout(lines)?.rows }
+
     /// Looks for rows of separate cells whose columns line up, the way Vision reads a table.
-    static func table(_ lines: [TextLine]) -> [[String]]? {
+    static func tableLayout(_ lines: [TextLine]) -> TableLayout? {
         guard lines.count >= 4 else { return nil }
 
         // Group cells into rows by vertical overlap, top row first.
@@ -87,7 +96,9 @@ enum TextFormatter {
             table.append(cells)
         }
         let used = columns.indices.filter { i in table.filter { !$0[i].isEmpty }.count >= 2 }
-        return used.count >= 2 ? table : nil
+        guard used.count >= 2 else { return nil }
+        let bands = rows.map { row in (row.map(\.box.minY).min() ?? 0)...(row.map(\.box.maxY).max() ?? 0) }
+        return TableLayout(rows: table, columns: columns, bands: bands)
     }
 
     private static let codeSymbols = try! NSRegularExpression(pattern: #"[{}\[\]();<>=|&]|=>|->|::|//|\+\+|!="#)
@@ -116,7 +127,7 @@ enum TextFormatter {
     static func format(_ lines: [TextLine], kind: ContentKind, options: FormatOptions) -> String {
         switch kind {
         case .table(let rows):
-            return fixLookAlikes(rows.map { $0.joined(separator: "\t") }.joined(separator: "\n"))
+            return textTable(rows.map { $0.map(fixLookAlikes) })
         case .code:
             return fixLookAlikes(formatCode(lines))
         case .prose:
@@ -134,37 +145,66 @@ enum TextFormatter {
         }.joined(separator: "\n")
     }
 
+    /// Bullet styles by nesting level, the way most apps draw nested lists.
+    static let levelBullets = ["•", "◦", "▪"]
+    static let indentUnit = "    "
+
     private static func formatProse(_ lines: [TextLine], options: FormatOptions) -> String {
-        let charWidth = estimatedCharWidth(lines)
+        let charWidth = max(estimatedCharWidth(lines), 0.004)
         let left = lines.map(\.box.minX).min() ?? 0
+        let texts = lines.map { options.tidyBullets ? tidyBullet($0.string) : $0.string }
+        let isItem = texts.map(startsListItem)
+        let offsets = lines.map { $0.box.minX - left }
+
+        // Nesting levels: group the left edges of list items (or of all lines when there's no
+        // list) into steps. Offsets past 40% of the width are a second column, not indentation.
+        func levels(of values: [CGFloat]) -> [CGFloat] {
+            var steps: [CGFloat] = []
+            for v in values.filter({ $0 < 0.4 }).sorted() where steps.last.map({ v - $0 > charWidth * 1.5 }) ?? true {
+                steps.append(v)
+            }
+            return steps
+        }
+        let hasList = isItem.contains(true)
+        let steps = levels(of: zip(offsets, isItem).filter { !hasList || $0.1 }.map(\.0))
+        func level(_ offset: CGFloat) -> Int {
+            guard offset < 0.4 else { return 0 }
+            return steps.lastIndex { $0 <= offset + charWidth * 0.75 } ?? 0
+        }
 
         var out: [String] = []
+        var lastItemIndent: String?
         var previous: TextLine?
-        for line in lines {
+        for (i, line) in lines.enumerated() {
             defer { previous = line }
-            var s = line.string
-            if options.tidyBullets { s = tidyBullet(s) }
-            let isListItem = startsListItem(s)
-
+            var s = texts[i]
             var indent = ""
-            if options.keepIndentation, charWidth > 0 {
-                let offset = line.box.minX - left
-                // Big offsets are a second column, not indentation.
-                if offset < 0.4 {
-                    let spaces = Int((offset / charWidth).rounded())
-                    if spaces >= 2 { indent = String(repeating: " ", count: spaces / 2 * 2) }
+            if isItem[i] {
+                let lvl = level(offsets[i])
+                if options.keepIndentation { indent = String(repeating: indentUnit, count: lvl) }
+                // Vision reads ◦ and ▪ as "•"; restore the style from the nesting level.
+                if options.tidyBullets, s.hasPrefix("• ") {
+                    s = levelBullets[lvl % levelBullets.count] + s.dropFirst(1)
+                }
+                lastItemIndent = indent
+            } else if options.keepIndentation {
+                if hasList, let itemIndent = lastItemIndent, offsets[i] > charWidth {
+                    indent = itemIndent + "  " // a list item's wrapped line, under its text
+                } else if !hasList {
+                    indent = String(repeating: indentUnit, count: level(offsets[i]))
                 }
             }
 
             guard let prev = previous, !out.isEmpty else { out.append(indent + s); continue }
 
-            if options.keepLineBreaks || isListItem {
+            if options.keepLineBreaks || isItem[i] {
                 out.append(indent + s)
                 continue
             }
             // Paragraph mode: join lines, but a visible gap or a jump back up starts a new paragraph.
             let gap = prev.box.minY - line.box.maxY
             if gap > prev.box.height * 0.8 || line.box.maxY > prev.box.maxY {
+                lastItemIndent = nil
                 out.append("")
                 out.append(s)
             } else if out[out.count - 1].hasSuffix("-"), let first = s.first, first.isLowercase {
@@ -187,12 +227,41 @@ enum TextFormatter {
         return widths.isEmpty ? 0 : widths[widths.count / 2]
     }
 
-    /// Text read straight from an app (Direct Text) is already exact: only apply the
-    /// layout choices, never "fixes".
-    static func formatDirect(_ text: String, kind: ContentKind, options: FormatOptions) -> String {
-        if kind == .code { return text.split(separator: "\n", omittingEmptySubsequences: false).map { codeClean(String($0)) }.joined(separator: "\n") }
-        var lines = text.components(separatedBy: "\n")
+    /// Text read straight from an app (Direct Text) is already exact, so only layout is
+    /// applied. Apps don't report indentation, and list markers often arrive on a line of
+    /// their own, so markers are re-attached and the indentation and bullet style are
+    /// borrowed from the OCR read of the same area when the lines match up.
+    static func formatDirect(_ text: String, ocrText: String, kind: ContentKind, options: FormatOptions) -> String {
+        if kind == .code {
+            return text.components(separatedBy: "\n").map(codeClean).joined(separator: "\n")
+        }
+
+        var lines: [String] = []
+        var marker: String?
+        for raw in text.components(separatedBy: "\n") {
+            let t = raw.trimmingCharacters(in: .whitespaces)
+            if isMarkerOnly(t) { marker = t; continue }
+            if let m = marker, !t.isEmpty { lines.append(m + " " + t); marker = nil } else { lines.append(t) }
+        }
         if options.tidyBullets { lines = lines.map(tidyBullet) }
+
+        let ocrLines = ocrText.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        let appLines = lines.filter { !$0.isEmpty }
+        if options.keepLineBreaks, ocrLines.count == appLines.count,
+           zip(appLines, ocrLines).allSatisfy({ similarity($0, $1) >= 0.5 }) {
+            var j = 0
+            lines = lines.map { line in
+                guard !line.isEmpty else { return line }
+                let ocr = ocrLines[j]
+                j += 1
+                let indent = options.keepIndentation ? String(ocr.prefix { $0 == " " }) : ""
+                let ocrBody = String(ocr.drop { $0 == " " })
+                guard let ocrMarker = bulletPrefix(ocrBody) else { return indent + line }
+                let body = bulletPrefix(line).map { String(line.dropFirst($0.count)) } ?? line
+                return indent + ocrMarker + body
+            }
+        }
+
         var out: String
         if options.keepLineBreaks {
             out = lines.joined(separator: "\n")
@@ -200,14 +269,43 @@ enum TextFormatter {
             // Join wrapped lines; blank lines and list items still start a new line.
             out = ""
             for line in lines {
-                let t = line.trimmingCharacters(in: .whitespaces)
-                if out.isEmpty { out = t; continue }
-                if t.isEmpty { if !out.hasSuffix("\n\n") { out += "\n\n" }; continue }
-                if out.hasSuffix("\n") || startsListItem(t) { out += (out.hasSuffix("\n") ? "" : "\n") + t } else { out += " " + t }
+                if out.isEmpty { out = line; continue }
+                if line.isEmpty { if !out.hasSuffix("\n\n") { out += "\n\n" }; continue }
+                if out.hasSuffix("\n") || startsListItem(line) {
+                    out += (out.hasSuffix("\n") ? "" : "\n") + line
+                } else {
+                    out += " " + line
+                }
             }
         }
         if options.straightQuotes { out = straightenQuotes(out) }
         return out
+    }
+
+    /// "•", "◦", "1.", "a)" on a line by itself.
+    private static func isMarkerOnly(_ s: String) -> Bool {
+        s.range(of: #"^([•◦▪●○■□‣⁃∙·\-*–]|\d{1,3}[.)]|[a-zA-Z][.)])$"#, options: .regularExpression) != nil
+    }
+
+    /// The bullet and its space at the start of a line ("• ", "◦ "), if any.
+    private static func bulletPrefix(_ s: String) -> String? {
+        guard let first = s.first, bulletGlyphs.contains(first) || levelBullets.contains(String(first)),
+              s.dropFirst().first == " " else { return nil }
+        return String(first) + " "
+    }
+
+    /// Letter-pair (Dice) similarity between two strings, 0–1.
+    static func similarity(_ a: String, _ b: String) -> Double {
+        func pairs(_ s: String) -> [String: Int] {
+            let chars = Array(s.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+            var counts: [String: Int] = [:]
+            if chars.count >= 2 { for i in 0..<(chars.count - 1) { counts[String(chars[i]) + String(chars[i + 1]), default: 0] += 1 } }
+            return counts
+        }
+        let x = pairs(a), y = pairs(b)
+        let total = x.values.reduce(0, +) + y.values.reduce(0, +)
+        guard total > 0 else { return a.lowercased() == b.lowercased() ? 1 : 0 }
+        return Double(2 * x.reduce(0) { $0 + min($1.value, y[$1.key] ?? 0) }) / Double(total)
     }
 
     // MARK: - Look-alike letters
@@ -245,7 +343,8 @@ enum TextFormatter {
         // "-" and "*" only count as bullets when followed by a space ("-5" and "*args" are not).
         if (first == "-" || first == "*" || first == "–" || first == "—"), rest.first != " " { return s }
         guard let text = rest.drop(while: { $0 == " " }).nilIfEmpty else { return s }
-        return "• " + text
+        let style = first == "◦" || first == "○" ? "◦" : (first == "▪" || first == "■" ? "▪" : "•")
+        return style + " " + text
     }
 
     private static func startsListItem(_ s: String) -> Bool {
@@ -301,6 +400,43 @@ enum TextFormatter {
         return regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
             Range($0.range, in: text).map { String(text[$0]) }
         }
+    }
+
+    /// A table drawn with text, for places that only take plain text (Messages, Slack…):
+    /// padded columns with "|" between them. It's also a valid Markdown table, so Notion,
+    /// Obsidian, GitHub and other Markdown apps show it as a real table.
+    static func textTable(_ rows: [[String]]) -> String {
+        guard let header = rows.first, !header.isEmpty else { return "" }
+        let widths = header.indices.map { c in max(3, rows.map { c < $0.count ? $0[c].count : 0 }.max() ?? 3) }
+        func line(_ cells: [String]) -> String {
+            "| " + widths.indices.map { c in
+                let cell = (c < cells.count ? cells[c] : "").replacingOccurrences(of: "|", with: "/")
+                return cell.padding(toLength: widths[c], withPad: " ", startingAt: 0)
+            }.joined(separator: " | ") + " |"
+        }
+        let rule = "| " + widths.map { String(repeating: "-", count: $0) }.joined(separator: " | ") + " |"
+        return ([line(header), rule] + rows.dropFirst().map(line)).joined(separator: "\n")
+    }
+
+    /// The same table as HTML, which Google Docs, Pages, Notes, Mail, Word, Numbers, Excel
+    /// and Sheets paste as a real table.
+    static func htmlTable(_ rows: [[String]]) -> String {
+        func esc(_ s: String) -> String {
+            s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
+                .replacingOccurrences(of: ">", with: "&gt;")
+        }
+        let cellStyle = "border:1px solid #bbb;padding:4px 8px;text-align:left"
+        var html = "<meta charset=\"utf-8\"><table style=\"border-collapse:collapse\">"
+        for (r, row) in rows.enumerated() {
+            let tag = r == 0 ? "th" : "td"
+            html += "<tr>" + row.map { "<\(tag) style=\"\(cellStyle)\">\(esc($0))</\(tag)>" }.joined() + "</tr>"
+        }
+        return html + "</table>"
+    }
+
+    /// "Not a table": each row as an ordinary line of text.
+    static func plainRows(_ rows: [[String]]) -> String {
+        rows.map { $0.filter { !$0.isEmpty }.joined(separator: " ") }.joined(separator: "\n")
     }
 
     static func markdownTable(_ rows: [[String]]) -> String {

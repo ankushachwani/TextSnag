@@ -171,7 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // Use the app's text only when it matches what's visible (tables keep their columns).
             if let direct, !result.raw.isEmpty, DirectText.agrees(direct: direct, ocr: result.raw) {
                 if case .table = result.kind {} else {
-                    result.text = TextFormatter.formatDirect(direct, kind: result.kind, options: options)
+                    result.text = TextFormatter.formatDirect(direct, ocrText: result.text, kind: result.kind, options: options)
                     result.isDirectText = true
                 }
             }
@@ -192,7 +192,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             output = settings.additiveBuffer.isEmpty ? output : settings.additiveBuffer + "\n" + output
             settings.additiveBuffer = output
         }
-        copyToClipboard(output)
+        // Tables also go on the clipboard as HTML, so they paste as real tables.
+        var html: String?
+        if !settings.additive, case .table(let rows) = result.kind, result.codes.isEmpty {
+            html = TextFormatter.htmlTable(rows)
+        }
+        let actions = (settings.showToast && settings.quickActions && !settings.additive) ? quickActions(for: result) : []
+        if actions.isEmpty {
+            copyToClipboard(output, html: html)
+        } else {
+            copyWatchingForPaste(output, html: html) { Toast.pasted() }
+        }
 
         if let up = mouseUpTime {
             log.notice("""
@@ -205,7 +215,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if settings.playSound { NSSound(named: "Tink")?.play() }
         if settings.showToast {
-            let actions = (settings.quickActions && !settings.additive) ? quickActions(for: result) : []
             Toast.show(message(for: result), symbol: symbol(for: result), actions: actions)
         }
 
@@ -255,7 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         if case .table(let rows) = result.kind {
-            actions.append(ToastAction(title: "Markdown") { copy(TextFormatter.markdownTable(rows), "Copied as Markdown") })
+            actions.append(ToastAction(title: "Not a Table") { copy(TextFormatter.plainRows(rows), "Copied as plain text") })
         }
 
         // Links, emails and phone numbers found in the text.
@@ -280,7 +289,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
 
-        if text.contains("\n") {
+        if case .table = result.kind {} else if text.contains("\n") {
             actions.append(ToastAction(title: "One Line") { copy(TextFormatter.oneLine(text), "Copied as one line") })
         }
         let numbers = TextFormatter.numbers(text)
@@ -293,10 +302,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return Array(actions.prefix(4))
     }
 
-    private func copyToClipboard(_ text: String) {
+    private func copyToClipboard(_ text: String, html: String? = nil) {
+        pasteWatcher = nil
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
+        if let html { pb.setString(html, forType: .html) }
+    }
+
+    /// Puts `text` on the clipboard so that macOS asks TextSnag for it at the moment another
+    /// app pastes. That's how we know you pasted, with no extra permission.
+    private var pasteWatcher: PasteWatcher?
+    private func copyWatchingForPaste(_ text: String, html: String? = nil, onPaste: @escaping () -> Void) {
+        let watcher = PasteWatcher(text: text, html: html, onPaste: onPaste)
+        let item = NSPasteboardItem()
+        item.setDataProvider(watcher, forTypes: html == nil ? [.string] : [.html, .string])
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.writeObjects([item])
+        pasteWatcher = watcher
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Text that hasn't been pasted yet would vanish with the app: hand it over now.
+        if let watcher = pasteWatcher, !watcher.provided { copyToClipboard(watcher.text, html: watcher.html) }
     }
 
     private func toast(_ message: String, _ symbol: String) {
@@ -408,4 +437,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleSpeak() { settings.speak.toggle() }
     @objc private func stopSpeaking() { speech.stopSpeaking(at: .immediate) }
     @objc private func openSettings() { SettingsWindow.shared.show() }
+}
+
+/// Supplies the clipboard text when an app pastes it, and reports the paste.
+final class PasteWatcher: NSObject, NSPasteboardItemDataProvider {
+    let text: String
+    let html: String?
+    private let onPaste: () -> Void
+    private let copiedAt = Date()
+    private(set) var provided = false
+
+    init(text: String, html: String? = nil, onPaste: @escaping () -> Void) {
+        self.text = text
+        self.html = html
+        self.onPaste = onPaste
+    }
+
+    func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem, provideDataForType type: NSPasteboard.PasteboardType) {
+        item.setString(type == .html ? (html ?? text) : text, forType: type)
+        provided = true
+        // Clipboard managers read new clips right away; a real paste comes later.
+        if Date().timeIntervalSince(copiedAt) > 0.8 {
+            DispatchQueue.main.async { self.onPaste() }
+        }
+    }
+
+    func pasteboardFinishedWithDataProvider(_ pasteboard: NSPasteboard) {}
 }
