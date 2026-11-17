@@ -16,7 +16,7 @@ final class Toast {
     private static var deadline = Date()
 
     /// How long the bubble stays when it has quick actions (unless you paste first).
-    static let actionsLifetime: TimeInterval = 15
+    static let actionsLifetime: TimeInterval = 3
 
     static func show(_ message: String, symbol: String = "doc.on.clipboard", actions: [ToastAction] = []) {
         hideWork?.cancel()
@@ -93,13 +93,13 @@ final class Toast {
         if actions.isEmpty {
             scheduleHide(after: 1.4)
         } else {
-            // Quick actions stay 15 s, or until a few seconds after you paste, or until you
-            // copy something else.
+            // Quick actions stay 3 s, or until you paste or copy something else, whichever
+            // comes first. Hovering keeps them open.
             deadline = Date().addingTimeInterval(actionsLifetime)
             scheduleHide(after: actionsLifetime)
             watchForPaste()
             content.onHover = { inside in
-                if inside { hideWork?.cancel() } else { scheduleHide(after: max(2, deadline.timeIntervalSinceNow)) }
+                if inside { hideWork?.cancel() } else { scheduleHide(after: max(1, deadline.timeIntervalSinceNow)) }
             }
         }
     }
@@ -114,13 +114,10 @@ final class Toast {
         }
     }
 
-    /// Called when the captured text is pasted somewhere: keep the buttons a few more
-    /// seconds, then fade.
-    static let afterPasteLifetime: TimeInterval = 4
+    /// Called when the captured text is pasted somewhere: close the bubble.
     static func pasted() {
         guard panel?.isVisible == true, !targets.isEmpty else { return }
-        deadline = Date().addingTimeInterval(afterPasteLifetime)
-        scheduleHide(after: afterPasteLifetime)
+        scheduleHide(after: 0)
     }
 
     private static func stopWatchingForPaste() {
