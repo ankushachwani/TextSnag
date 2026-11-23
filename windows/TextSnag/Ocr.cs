@@ -86,7 +86,7 @@ namespace TextSnag
             var codesTask = Task.Run(() => DetectCodes(image));
 
             var page = ReadPage(image);
-            var lines = page.Lines;
+            var lines = page.Lines.Select(FixMisreadBullet).ToList();
             var kind = ContentKind.Prose;
             var layout = options.DetectTables ? TextFormatter.DetectTable(page.Cells) : null;
             if (layout != null)
@@ -237,6 +237,13 @@ namespace TextSnag
         }
 
         // MARK: - Bullets
+
+        /// <summary>
+        /// Windows OCR often reads a round bullet "•" as a comma. No line of real text starts with
+        /// ", ", so treat it as the bullet it was.
+        /// </summary>
+        private static TextLine FixMisreadBullet(TextLine line) =>
+            line.Text.StartsWith(", ", StringComparison.Ordinal) ? new TextLine("• " + line.Text.Substring(2), line.Box, line.Confidence) : line;
 
         private static readonly Regex NumberedLine = new Regex(@"^(\d{1,3}|[a-zA-Z])[.)]\s", RegexOptions.Compiled);
 
