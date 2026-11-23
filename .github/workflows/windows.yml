@@ -1,0 +1,50 @@
+name: Windows
+
+on:
+  push:
+    paths: ['windows/**', '.github/workflows/windows.yml']
+  pull_request:
+    paths: ['windows/**', '.github/workflows/windows.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Formatter tests
+        run: dotnet run --project windows/Tests -c Release
+
+      - name: Build
+        run: dotnet build windows/TextSnag -c Release
+
+      # End-to-end checks with the real Windows OCR engine, QR reader and clipboard. The runner's
+      # OCR quality and installed languages can differ from a desktop PC, so these report but
+      # don't fail the build.
+      - name: Self-test (OCR, tables, lists, QR)
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & windows/TextSnag/bin/Release/net48/TextSnag.exe --selftest | Out-Host
+          exit $LASTEXITCODE
+
+      - name: Paste detection test
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & windows/TextSnag/bin/Release/net48/TextSnag.exe --paste-test | Out-Host
+          exit $LASTEXITCODE
+
+      - name: Package
+        shell: pwsh
+        run: windows/build.ps1 -SkipBuild
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TextSnag-Windows
+          path: dist/TextSnag-Windows.zip
