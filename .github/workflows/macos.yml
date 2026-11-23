@@ -1,0 +1,25 @@
+name: macOS
+
+on:
+  push:
+    paths: ['macos/**', '.github/workflows/macos.yml']
+  pull_request:
+    paths: ['macos/**', '.github/workflows/macos.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (Apple Silicon + Intel)
+        working-directory: macos
+        run: swift build -c release --arch arm64 --arch x86_64
+
+      # Uses Apple's Vision models on the runner; their availability varies, so this reports
+      # without failing the build.
+      - name: Self-test
+        continue-on-error: true
+        working-directory: macos
+        run: .build/apple/Products/Release/TextSnag --selftest
