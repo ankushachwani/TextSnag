@@ -8,3 +8,4 @@ windows/**/bin/
 windows/**/obj/
 .vs/
 *.user
+brag-output*/

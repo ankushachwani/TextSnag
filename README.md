@@ -15,6 +15,8 @@
   &nbsp;·&nbsp;
   <a href="https://github.com/ankushachwani/TextSnag/releases/latest/download/TextSnag-Windows.zip"><b>Download for Windows</b></a>
   &nbsp;·&nbsp;
+  <a href="https://ankushachwani.github.io/TextSnag/#film">Watch the 20-second film</a>
+  &nbsp;·&nbsp;
   <a href="https://ankushachwani.github.io/TextSnag/">Website</a>
 </p>
 
@@ -28,7 +30,7 @@
 </p>
 
 <p align="center">
-  <img src="site/share.jpg" width="820" alt="The TextSnag website: a line copied from a paused video, with the Copied text bubble and the pasted note">
+  <img src=".github/assets/demo.gif" width="440" alt="TextSnag copying a lecture slide's heading from a paused video into a note: drag, the Copied text bubble, paste">
 </p>
 
 ## Why TextSnag
